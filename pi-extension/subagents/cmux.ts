@@ -1025,11 +1025,19 @@ export function sendCommand(surface: string, command: string): void {
   }
 
   if (backend === "wezterm") {
+    // Bracketed paste: send the whole command as one "paste" so PSReadLine /
+    // readline treat it atomically. With --no-paste (char-by-char key events),
+    // PSReadLine on long CJK-path commands can drop characters (quotes,
+    // backslashes), producing broken paths like `C:Users10453...`.
     execFileSync(
       "wezterm",
-      ["cli", "send-text", "--pane-id", surface, "--no-paste", command + "\n"],
+      ["cli", "send-text", "--pane-id", surface, "--no-paste", "\u001b[200~" + command + "\u001b[201~"],
       { encoding: "utf8" },
     );
+    // Execute as a separate keypress so the paste is never merged with Enter.
+    execFileSync("wezterm", ["cli", "send-text", "--pane-id", surface, "--no-paste", "\r"], {
+      encoding: "utf8",
+    });
     return;
   }
 
