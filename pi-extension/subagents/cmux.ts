@@ -143,7 +143,9 @@ export function shellEscape(s: string): string {
 }
 
 function tailLines(text: string, lines: number): string {
-  const split = text.split("\n");
+  // WezTerm includes unused blank screen rows after the shell prompt.
+  // Ignore those rows or the last N lines never contain the exit sentinel.
+  const split = text.trimEnd().split("\n");
   if (split.length <= lines) return text;
   return split.slice(-lines).join("\n");
 }
@@ -856,6 +858,15 @@ export function createSurfaceSplit(
     if (fromSurface) {
       args.push("--pane-id", fromSurface);
     }
+    if (process.platform === "win32") {
+      // Use a known POSIX shell rather than typing bash commands into PSReadLine.
+      // WSL bash is not suitable for the Windows-native pi installation.
+      const candidates = execFileSync("where.exe", ["bash.exe"], { encoding: "utf8" })
+        .trim().split(/\r?\n/);
+      const gitBash = candidates.find((path) => /[\\/]Git[\\/](usr[\\/]bin|bin)[\\/]bash\.exe$/i.test(path));
+      if (!gitBash) throw new Error("Windows subagents require Git Bash (Git for Windows) on PATH.");
+      args.push("--", gitBash, "--noprofile", "--norc", "-i");
+    }
     const paneId = execFileSync("wezterm", args, { encoding: "utf8" }).trim();
     if (!paneId || !/^\d+$/.test(paneId)) {
       throw new Error(`Unexpected wezterm split-pane output: ${paneId || "(empty)"}`);
@@ -1105,7 +1116,16 @@ export function sendLongCommand(
   writeFileSync(scriptPath, scriptParts.join("\n") + "\n", {
     mode: 0o755,
   });
-  sendCommand(surface, `bash ${shellEscape(scriptPath)}`);
+  let shellScriptPath = scriptPath;
+  if (process.platform === "win32") {
+    // Keep the artifact for debugging, but launch an ASCII-named temporary copy.
+    // Git Bash's terminal code page can otherwise misdecode a CJK filename.
+    const launchPath = join(tmpdir(), `pi-subagent-launch-${Date.now()}-${Math.random().toString(16).slice(2, 8)}.sh`);
+    writeFileSync(launchPath, 'export PATH="/usr/bin:/bin:$PATH"\nexport LANG=C.UTF-8 LC_ALL=C.UTF-8\n' + scriptParts.slice(1).join("\n") + "\n");
+    shellScriptPath = launchPath.replace(/\\/g, "/").replace(/^([A-Za-z]):/, (_, drive: string) => `/${drive.toLowerCase()}`);
+  }
+  const bashCommand = process.platform === "win32" ? "/usr/bin/bash" : "bash";
+  sendCommand(surface, `${bashCommand} ${shellEscape(shellScriptPath)}`);
   return scriptPath;
 }
 
@@ -1214,9 +1234,14 @@ export function closeSurface(surface: string): void {
   }
 
   if (backend === "wezterm") {
-    execFileSync("wezterm", ["cli", "kill-pane", "--pane-id", surface], {
-      encoding: "utf8",
-    });
+    try {
+      execFileSync("wezterm", ["cli", "kill-pane", "--pane-id", surface], {
+        encoding: "utf8", stdio: "pipe",
+      });
+    } catch (error: any) {
+      // Closing an already-closed pane is successful cleanup, not agent failure.
+      if (!/no such pane/i.test(String(error?.stderr ?? error?.message))) throw error;
+    }
     return;
   }
 
